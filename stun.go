@@ -133,12 +133,8 @@ func PingRelaysWithLog(endpoints []RelayEndpoint, tokens, authTokens map[string]
 		}
 		seen[ep.RelayName] = true
 
-		// Use auth_token for STUN binding (token is for media relay)
-		token := authTokens[ep.AuthTokenID]
-		if token == nil {
-			// Fallback to regular token
-			token = tokens[ep.TokenID]
-		}
+		// Use regular token for STUN binding (auth_token causes timeout)
+		token := tokens[ep.TokenID]
 		if token == nil {
 			if log != nil {
 				log.Warnf("No token for relay %s (auth_token_id=%s, token_id=%s)", ep.RelayName, ep.AuthTokenID, ep.TokenID)
