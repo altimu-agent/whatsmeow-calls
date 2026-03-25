@@ -84,8 +84,11 @@ func (cb *CallBridge) AcceptCall(ctx context.Context, callID string) error {
 		}
 		stunResults = PingRelaysWithLog(offer.Relay.Endpoints, offer.Relay.Tokens, 3*time.Second, cb.log)
 		for _, r := range stunResults {
-			cb.log.Infof("STUN relay %s: RTT=%v mapped=%s:%d session=%x",
-				r.RelayName, r.RTT, r.MappedIP, r.MappedPort, r.SessionData)
+			cb.log.Infof("STUN relay %s: type=0x%04x size=%d RTT=%v mapped=%s:%d session=%x otherAttrs=%d",
+				r.RelayName, r.ResponseType, r.ResponseSize, r.RTT, r.MappedIP, r.MappedPort, r.SessionData, len(r.OtherAttrs))
+			for _, a := range r.OtherAttrs {
+				cb.log.Infof("  attr 0x%04x: %d bytes = %x", a.Type, len(a.Value), a.Value)
+			}
 		}
 		if len(stunResults) == 0 {
 			cb.log.Warnf("All STUN relay pings failed for call %s", callID)

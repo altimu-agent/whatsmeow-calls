@@ -34,12 +34,15 @@ const (
 
 // STUNResult holds the result of a relay STUN binding.
 type STUNResult struct {
-	RelayName   string
-	RelayAddr   string // IP:port we sent to
-	RTT         time.Duration
-	MappedIP    net.IP // Our public IP as seen by the relay (XOR-MAPPED-ADDR)
-	MappedPort  uint16
-	SessionData []byte // 0x4002 attribute from response
+	RelayName    string
+	RelayAddr    string // IP:port we sent to
+	RTT          time.Duration
+	ResponseType uint16 // STUN response message type
+	ResponseSize int    // total response bytes
+	MappedIP     net.IP // Our public IP as seen by the relay (XOR-MAPPED-ADDR)
+	MappedPort   uint16
+	SessionData  []byte          // 0x4002 attribute from response
+	OtherAttrs   []stunAttribute // any other attributes in the response
 }
 
 // PingRelay sends a STUN Allocate request with a WhatsApp token to a relay server.
@@ -78,10 +81,13 @@ func PingRelay(endpoint RelayEndpoint, token []byte, timeout time.Duration) (*ST
 	rtt := time.Since(start)
 
 	// Parse response
+	respType := binary.BigEndian.Uint16(buf[0:2])
 	result := &STUNResult{
-		RelayName: endpoint.RelayName,
-		RelayAddr: addr,
-		RTT:       rtt,
+		RelayName:    endpoint.RelayName,
+		RelayAddr:    addr,
+		RTT:          rtt,
+		ResponseType: respType,
+		ResponseSize: n,
 	}
 
 	attrs, err := parseSTUNResponse(buf[:n], txID)
@@ -95,6 +101,8 @@ func PingRelay(endpoint RelayEndpoint, token []byte, timeout time.Duration) (*ST
 			result.MappedIP, result.MappedPort = decodeXORMappedAddr(attr.Value, txID)
 		case stunAttrWASession:
 			result.SessionData = attr.Value
+		default:
+			result.OtherAttrs = append(result.OtherAttrs, attr)
 		}
 	}
 
