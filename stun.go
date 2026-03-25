@@ -18,8 +18,8 @@ import (
 const (
 	stunMagicCookie = 0x2112A442
 
-	// Standard STUN message types
-	stunAllocateRequest = 0x0003 // TURN Allocate
+	// STUN message types
+	stunBindingRequest = 0x0001 // STUN Binding Request
 
 	// WhatsApp custom STUN attributes
 	stunAttrWAToken   = 0x4000 // Relay authentication token
@@ -61,7 +61,7 @@ func PingRelay(endpoint RelayEndpoint, token []byte, timeout time.Duration) (*ST
 	txID := make([]byte, 12)
 	rand.Read(txID)
 
-	msg := buildSTUNMessage(stunAllocateRequest, txID, []stunAttribute{
+	msg := buildSTUNMessage(stunBindingRequest, txID, []stunAttribute{
 		{Type: stunAttrWAToken, Value: token},
 	})
 
