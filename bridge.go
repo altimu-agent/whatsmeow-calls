@@ -15,11 +15,13 @@ package whatsmeowcalls
 
 import (
 	"context"
+	"strings"
 	"sync"
 	"time"
 
 	"go.mau.fi/whatsmeow"
 	waBinary "go.mau.fi/whatsmeow/binary"
+	"go.mau.fi/whatsmeow/types"
 	"go.mau.fi/whatsmeow/types/events"
 	waLog "go.mau.fi/whatsmeow/util/log"
 )
@@ -29,6 +31,7 @@ type CallBridge struct {
 	client    *whatsmeow.Client
 	internals *whatsmeow.DangerousInternalClient
 	opts      Options
+	allowed   map[string]bool // phone number -> true
 	sessions  map[string]*CallSession
 	mu        sync.RWMutex
 	log       waLog.Logger
@@ -40,10 +43,15 @@ func NewCallBridge(client *whatsmeow.Client, opts Options) *CallBridge {
 	if log == nil {
 		log = waLog.Noop
 	}
+	allowed := make(map[string]bool, len(opts.AllowedNumbers))
+	for _, num := range opts.AllowedNumbers {
+		allowed[strings.TrimPrefix(num, "+")] = true
+	}
 	return &CallBridge{
 		client:    client,
 		internals: client.DangerousInternals(),
 		opts:      opts,
+		allowed:   allowed,
 		sessions:  make(map[string]*CallSession),
 		log:       log,
 	}
@@ -112,6 +120,15 @@ func (cb *CallBridge) getOrCreateSession(callID string) *CallSession {
 	return s
 }
 
+// isAllowed checks if a JID's phone number is in the whitelist.
+// If the whitelist is empty, all numbers are allowed.
+func (cb *CallBridge) isAllowed(jid types.JID) bool {
+	if len(cb.allowed) == 0 {
+		return true
+	}
+	return cb.allowed[jid.User]
+}
+
 func (cb *CallBridge) recordNode(session *CallSession, eventType string, node *waBinary.Node) {
 	session.mu.Lock()
 	session.AllNodes = append(session.AllNodes, TimestampedNode{
@@ -129,6 +146,15 @@ func (cb *CallBridge) recordNode(session *CallSession, eventType string, node *w
 }
 
 func (cb *CallBridge) handleOffer(evt *events.CallOffer) {
+	if !cb.isAllowed(evt.From) {
+		cb.log.Infof("Rejecting call from non-whitelisted number %s (id=%s)", evt.From, evt.CallID)
+		_ = cb.client.RejectCall(context.Background(), evt.From, evt.CallID)
+		if cb.opts.OnCallRejected != nil {
+			cb.opts.OnCallRejected(evt.From, evt.CallID, "not_whitelisted")
+		}
+		return
+	}
+
 	session := cb.getOrCreateSession(evt.CallID)
 	session.mu.Lock()
 	session.From = evt.From
@@ -155,6 +181,15 @@ func (cb *CallBridge) handleOffer(evt *events.CallOffer) {
 }
 
 func (cb *CallBridge) handleOfferNotice(evt *events.CallOfferNotice) {
+	if !cb.isAllowed(evt.From) {
+		cb.log.Infof("Rejecting group call from non-whitelisted number %s (id=%s)", evt.From, evt.CallID)
+		_ = cb.client.RejectCall(context.Background(), evt.From, evt.CallID)
+		if cb.opts.OnCallRejected != nil {
+			cb.opts.OnCallRejected(evt.From, evt.CallID, "not_whitelisted")
+		}
+		return
+	}
+
 	session := cb.getOrCreateSession(evt.CallID)
 	session.mu.Lock()
 	session.From = evt.From

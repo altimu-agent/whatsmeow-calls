@@ -110,9 +110,17 @@ type Options struct {
 	// Leave empty to disable dumping.
 	LogDir string
 
+	// AllowedNumbers is a whitelist of phone numbers (without "+" prefix)
+	// that are permitted to call. Calls from numbers not in this list are
+	// automatically rejected. If empty, all calls are allowed through.
+	AllowedNumbers []string
+
 	// OnIncomingCall is invoked when a new call offer is received.
 	// The callback receives an IncomingCall that can be used to accept or reject.
 	OnIncomingCall func(call *IncomingCall)
+
+	// OnCallRejected is invoked when a call is auto-rejected (e.g. not whitelisted).
+	OnCallRejected func(from types.JID, callID, reason string)
 
 	// OnCallTerminated is invoked when a call ends (by either party).
 	OnCallTerminated func(session *CallSession)
