@@ -37,28 +37,15 @@ func (cb *CallBridge) DecryptCallOffer(ctx context.Context, session *CallSession
 		return nil, fmt.Errorf("no enc node in offer for call %s", session.CallID)
 	}
 
-	// Determine if this is a PreKey message
-	isPreKey := offer.EncType == "msg"
+	// whatsmeow convention: "pkmsg" = PreKey message, "msg" = normal Signal message
+	isPreKey := offer.EncType == "pkmsg"
 
-	// Try to get the enc node from the raw offer node first (preserves original types),
-	// fall back to the parsed copy
+	// Get the enc node from the raw offer node (preserves original []byte content)
 	encNode := offer.EncNode
-	if offerNode != nil {
-		for _, child := range offerNode.GetChildren() {
-			if child.Tag == "enc" {
-				encNode = &child
-				break
-			}
-		}
-	}
-	if encNode.Content != nil {
-		switch v := encNode.Content.(type) {
-		case []byte:
-			cb.log.Infof("Enc node content: []byte, %d bytes, first=0x%02x", len(v), v[0])
-		case string:
-			cb.log.Infof("Enc node content: string, %d chars", len(v))
-		default:
-			cb.log.Infof("Enc node content: %T", encNode.Content)
+	for _, child := range offerNode.GetChildren() {
+		if child.Tag == "enc" {
+			encNode = &child
+			break
 		}
 	}
 

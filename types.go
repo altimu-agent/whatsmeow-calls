@@ -75,6 +75,7 @@ type CallSession struct {
 	// Parsed offer data (Phase 2)
 	Offer            *OfferData
 	DecryptedPayload []byte // decrypted SRTP key material from Signal enc
+	CallKey          []byte // 32-byte SRTP master secret (extracted from DecryptedPayload)
 
 	// Raw signaling nodes — essential for protocol reverse-engineering
 	OfferNode     *waBinary.Node

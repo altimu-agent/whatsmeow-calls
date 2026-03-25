@@ -6,7 +6,9 @@ package whatsmeowcalls
 
 import (
 	"context"
+	"encoding/binary"
 	"fmt"
+	"time"
 
 	waBinary "go.mau.fi/whatsmeow/binary"
 	"go.mau.fi/whatsmeow/types"
@@ -35,87 +37,201 @@ func (cb *CallBridge) RejectCall(ctx context.Context, callID string) error {
 	return nil
 }
 
-// AcceptCall answers an incoming call.
+// AcceptCall answers an incoming call using the full signaling flow:
+// receipt → preaccept → relaylatency → accept.
 //
-// This sends an accept signaling node to the caller. The first iteration
-// sends a minimal accept (modeled after RejectCall's node structure).
-// The caller should briefly see "connected" even without media flowing.
-//
-// Phase 2: basic signaling accept.
-// Phase 3: will add relay binding + SRTP media.
+// The caller should see the call transition to "connected" state.
+// Without relay binding and SRTP (Phase 3), no audio will flow.
 func (cb *CallBridge) AcceptCall(ctx context.Context, callID string) error {
 	session := cb.GetSession(callID)
 	if session == nil {
 		return fmt.Errorf("no session found for call %s", callID)
 	}
 
-	session.mu.RLock()
-	from := session.From
-	creator := session.Creator
-	offer := session.Offer
-	session.mu.RUnlock()
-
-	// Step 1: Decrypt the Signal payload (SRTP key material)
-	plaintext, err := cb.DecryptCallOffer(ctx, session)
+	// Step 1: Decrypt the call key (32-byte SRTP master secret)
+	callKey, err := cb.DecryptCallOffer(ctx, session)
 	if err != nil {
-		cb.log.Warnf("Failed to decrypt call offer %s: %v (continuing with accept anyway)", callID, err)
+		cb.log.Warnf("Failed to decrypt call key for %s: %v (continuing anyway)", callID, err)
 	} else {
-		cb.log.Infof("Decrypted call offer %s: %d bytes of key material", callID, len(plaintext))
+		session.mu.Lock()
+		session.CallKey = callKey
+		session.mu.Unlock()
+		cb.log.Infof("Decrypted call key for %s: %d bytes", callID, len(callKey))
 	}
 
-	// Step 2: Send accept node
-	ownID := cb.client.Store.ID.ToNonAD()
-
-	// Build accept content — include relay selection if we have offer data
-	var acceptContent []waBinary.Node
-	if offer != nil && offer.Relay != nil && len(offer.Relay.Endpoints) > 0 {
-		// Select the lowest-RTT relay
-		best := offer.Relay.Endpoints[0]
-		for _, ep := range offer.Relay.Endpoints[1:] {
-			if ep.RTT < best.RTT {
-				best = ep
-			}
-		}
-		cb.log.Infof("Selected relay %s (%s:%d, RTT=%dms) for call %s",
-			best.RelayName, best.IP, best.Port, best.RTT, callID)
+	// Step 2: Send receipt (ACK for the offer)
+	if err := cb.sendReceipt(ctx, session); err != nil {
+		return fmt.Errorf("send receipt: %w", err)
 	}
 
-	acceptNode := waBinary.Node{
-		Tag: "call",
-		Attrs: waBinary.Attrs{
-			"id":   cb.client.GenerateMessageID(),
-			"from": ownID,
-			"to":   from.ToNonAD(),
-		},
-		Content: []waBinary.Node{{
-			Tag: "accept",
-			Attrs: waBinary.Attrs{
-				"call-id":      callID,
-				"call-creator": creator.ToNonAD(),
-				"count":        "0",
-			},
-			Content: acceptContent,
-		}},
+	// Step 3: Send preaccept (audio codec + capability)
+	if err := cb.sendPreAccept(ctx, session); err != nil {
+		return fmt.Errorf("send preaccept: %w", err)
 	}
 
-	cb.log.Infof("Sending accept for call %s to %s", callID, from)
+	// Small delay to allow relay latency exchange
+	time.Sleep(500 * time.Millisecond)
 
-	if err := cb.internals.SendNode(ctx, acceptNode); err != nil {
-		return fmt.Errorf("send accept for call %s: %w", callID, err)
+	// Step 4: Send relaylatency with RTT values from offer
+	if err := cb.sendRelayLatency(ctx, session); err != nil {
+		cb.log.Warnf("Failed to send relaylatency for %s: %v", callID, err)
+	}
+
+	// Small delay before accept
+	time.Sleep(300 * time.Millisecond)
+
+	// Step 5: Send accept (audio + capability + net + encopt)
+	if err := cb.sendAccept(ctx, session); err != nil {
+		return fmt.Errorf("send accept: %w", err)
 	}
 
 	session.mu.Lock()
 	session.State = StateAccepted
+	session.AcceptedAt = time.Now()
 	session.mu.Unlock()
 
-	cb.log.Infof("Accepted call %s", callID)
+	cb.log.Infof("Call %s accepted (full flow: receipt→preaccept→relaylatency→accept)", callID)
+	return nil
+}
+
+func (cb *CallBridge) sendReceipt(ctx context.Context, s *CallSession) error {
+	ownID := cb.client.Store.ID.ToNonAD()
+	s.mu.RLock()
+	from := s.From
+	creator := s.Creator
+	s.mu.RUnlock()
+
+	err := cb.internals.SendNode(ctx, waBinary.Node{
+		Tag:   "call",
+		Attrs: waBinary.Attrs{"id": cb.client.GenerateMessageID(), "from": ownID, "to": from.ToNonAD()},
+		Content: []waBinary.Node{{
+			Tag:   "receipt",
+			Attrs: waBinary.Attrs{"call-id": s.CallID, "call-creator": creator.ToNonAD()},
+		}},
+	})
+	if err != nil {
+		return err
+	}
+	cb.log.Infof("Sent receipt for call %s", s.CallID)
+	return nil
+}
+
+func (cb *CallBridge) sendPreAccept(ctx context.Context, s *CallSession) error {
+	ownID := cb.client.Store.ID.ToNonAD()
+	s.mu.RLock()
+	from := s.From
+	creator := s.Creator
+	s.mu.RUnlock()
+
+	err := cb.internals.SendNode(ctx, waBinary.Node{
+		Tag:   "call",
+		Attrs: waBinary.Attrs{"id": cb.client.GenerateMessageID(), "from": ownID, "to": from.ToNonAD()},
+		Content: []waBinary.Node{{
+			Tag:   "preaccept",
+			Attrs: waBinary.Attrs{"call-id": s.CallID, "call-creator": creator.ToNonAD()},
+			Content: []waBinary.Node{
+				{Tag: "audio", Attrs: waBinary.Attrs{"enc": "opus", "rate": "16000"}},
+				{Tag: "audio", Attrs: waBinary.Attrs{"enc": "opus", "rate": "8000"}},
+				{Tag: "capability", Attrs: waBinary.Attrs{"ver": "1"}, Content: []byte{1, 4, 247, 11, 206, 3}},
+				{Tag: "encopt", Attrs: waBinary.Attrs{"keygen": "2"}},
+				{Tag: "net", Attrs: waBinary.Attrs{"medium": "3"}},
+			},
+		}},
+	})
+	if err != nil {
+		return err
+	}
+	cb.log.Infof("Sent preaccept for call %s", s.CallID)
+	return nil
+}
+
+func (cb *CallBridge) sendRelayLatency(ctx context.Context, s *CallSession) error {
+	s.mu.RLock()
+	from := s.From
+	creator := s.Creator
+	offer := s.Offer
+	s.mu.RUnlock()
+
+	if offer == nil || offer.Relay == nil {
+		return fmt.Errorf("no relay info in offer")
+	}
+
+	ownID := cb.client.Store.ID.ToNonAD()
+
+	// Deduplicate endpoints by relay name and build te nodes
+	seen := make(map[string]bool)
+	var teNodes []waBinary.Node
+	for _, ep := range offer.Relay.Endpoints {
+		if seen[ep.RelayName] || ep.IP == nil || len(ep.IP) < 4 {
+			continue
+		}
+		seen[ep.RelayName] = true
+
+		// Encode IP:port as 6 bytes (IPv4)
+		ipPort := make([]byte, 6)
+		copy(ipPort[:4], ep.IP.To4())
+		binary.BigEndian.PutUint16(ipPort[4:], ep.Port)
+
+		// Latency format: 0x2000000 + actual_ms (observed in captures)
+		latency := fmt.Sprintf("%d", 33554432+ep.RTT)
+
+		teNodes = append(teNodes, waBinary.Node{
+			Tag:     "te",
+			Attrs:   waBinary.Attrs{"latency": latency, "relay_name": ep.RelayName},
+			Content: ipPort,
+		})
+	}
+
+	err := cb.internals.SendNode(ctx, waBinary.Node{
+		Tag:   "call",
+		Attrs: waBinary.Attrs{"id": cb.client.GenerateMessageID(), "from": ownID, "to": from.ToNonAD()},
+		Content: []waBinary.Node{{
+			Tag:     "relaylatency",
+			Attrs:   waBinary.Attrs{"call-id": s.CallID, "call-creator": creator.ToNonAD()},
+			Content: teNodes,
+		}},
+	})
+	if err != nil {
+		return err
+	}
+	cb.log.Infof("Sent relaylatency for call %s (%d relays)", s.CallID, len(teNodes))
+	return nil
+}
+
+func (cb *CallBridge) sendAccept(ctx context.Context, s *CallSession) error {
+	ownID := cb.client.Store.ID.ToNonAD()
+	s.mu.RLock()
+	from := s.From
+	creator := s.Creator
+	s.mu.RUnlock()
+
+	err := cb.internals.SendNode(ctx, waBinary.Node{
+		Tag:   "call",
+		Attrs: waBinary.Attrs{"id": cb.client.GenerateMessageID(), "from": ownID, "to": from.ToNonAD()},
+		Content: []waBinary.Node{{
+			Tag: "accept",
+			Attrs: waBinary.Attrs{
+				"call-id":      s.CallID,
+				"call-creator": creator.ToNonAD(),
+			},
+			Content: []waBinary.Node{
+				{Tag: "audio", Attrs: waBinary.Attrs{"enc": "opus", "rate": "16000"}},
+				{Tag: "audio", Attrs: waBinary.Attrs{"enc": "opus", "rate": "8000"}},
+				{Tag: "net", Attrs: waBinary.Attrs{"medium": "3"}},
+				{Tag: "encopt", Attrs: waBinary.Attrs{"keygen": "2"}},
+				{Tag: "capability", Attrs: waBinary.Attrs{"ver": "1"}, Content: []byte{1, 4, 247, 11, 206, 3}},
+			},
+		}},
+	})
+	if err != nil {
+		return err
+	}
+	cb.log.Infof("Sent accept for call %s", s.CallID)
 	return nil
 }
 
 // OfferCall initiates an outgoing call to the specified JID.
-//
-// NOTE: Not yet implemented. Requires building a full offer node with
-// relay allocation, Signal encryption, and codec negotiation.
+// NOTE: Not yet implemented.
 func (cb *CallBridge) OfferCall(ctx context.Context, to types.JID) error {
 	_ = ctx
 	_ = to
