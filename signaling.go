@@ -92,13 +92,22 @@ func (cb *CallBridge) AcceptCall(ctx context.Context, callID string) error {
 		}
 	}
 
-	if err := cb.sendRelayLatency(ctx, session); err != nil {
-		cb.log.Warnf("Failed to send relaylatency for %s: %v", callID, err)
+	// Send relaylatency with real STUN RTT data
+	if err := cb.sendRelayLatencyFromSTUN(ctx, session, stunResults); err != nil {
+		cb.log.Warnf("Failed to send relaylatency for %s: %v (falling back to offer data)", callID, err)
+		_ = cb.sendRelayLatency(ctx, session)
 	}
 
 	time.Sleep(200 * time.Millisecond)
 
-	// Step 5: Send accept (audio + capability + net + encopt + te with mapped addr)
+	// Step 5: Send transport with our mapped IPs
+	if err := cb.sendTransport(ctx, session, stunResults); err != nil {
+		cb.log.Warnf("Failed to send transport for %s: %v", callID, err)
+	}
+
+	time.Sleep(200 * time.Millisecond)
+
+	// Step 6: Send accept (audio + capability + net + encopt + te with mapped addr)
 	if err := cb.sendAccept(ctx, session, stunResults); err != nil {
 		return fmt.Errorf("send accept: %w", err)
 	}
@@ -213,6 +222,99 @@ func (cb *CallBridge) sendRelayLatency(ctx context.Context, s *CallSession) erro
 		return err
 	}
 	cb.log.Infof("Sent relaylatency for call %s (%d relays)", s.CallID, len(teNodes))
+	return nil
+}
+
+// sendRelayLatencyFromSTUN sends relaylatency with actual STUN RTT measurements.
+func (cb *CallBridge) sendRelayLatencyFromSTUN(ctx context.Context, s *CallSession, results []*STUNResult) error {
+	if len(results) == 0 {
+		return fmt.Errorf("no STUN results")
+	}
+
+	ownID := cb.client.Store.ID.ToNonAD()
+	s.mu.RLock()
+	from := s.From
+	creator := s.Creator
+	s.mu.RUnlock()
+
+	var teNodes []waBinary.Node
+	for _, r := range results {
+		if r.MappedIP == nil {
+			continue
+		}
+		// Parse relay addr to get IP:port for the te content
+		host, portStr, _ := net.SplitHostPort(r.RelayAddr)
+		relayIP := net.ParseIP(host)
+		if relayIP == nil {
+			continue
+		}
+		var port uint16
+		fmt.Sscanf(portStr, "%d", &port)
+
+		ipPort := make([]byte, 6)
+		copy(ipPort[:4], relayIP.To4())
+		binary.BigEndian.PutUint16(ipPort[4:], port)
+
+		rttMs := int(r.RTT.Milliseconds())
+		latency := fmt.Sprintf("%d", 33554432+rttMs)
+
+		teNodes = append(teNodes, waBinary.Node{
+			Tag:     "te",
+			Attrs:   waBinary.Attrs{"latency": latency, "relay_name": r.RelayName},
+			Content: ipPort,
+		})
+	}
+
+	if len(teNodes) == 0 {
+		return fmt.Errorf("no valid STUN results for relaylatency")
+	}
+
+	err := cb.internals.SendNode(ctx, waBinary.Node{
+		Tag:   "call",
+		Attrs: waBinary.Attrs{"id": cb.client.GenerateMessageID(), "from": ownID, "to": from.ToNonAD()},
+		Content: []waBinary.Node{{
+			Tag:     "relaylatency",
+			Attrs:   waBinary.Attrs{"call-id": s.CallID, "call-creator": creator.ToNonAD()},
+			Content: teNodes,
+		}},
+	})
+	if err != nil {
+		return err
+	}
+	cb.log.Infof("Sent relaylatency (STUN) for call %s (%d relays)", s.CallID, len(teNodes))
+	return nil
+}
+
+// sendTransport sends our transport endpoint information to the caller.
+func (cb *CallBridge) sendTransport(ctx context.Context, s *CallSession, stunResults []*STUNResult) error {
+	ownID := cb.client.Store.ID.ToNonAD()
+	s.mu.RLock()
+	from := s.From
+	creator := s.Creator
+	s.mu.RUnlock()
+
+	teNodes := cb.buildTENodes(stunResults)
+	if len(teNodes) == 0 {
+		return fmt.Errorf("no te nodes for transport")
+	}
+
+	content := append(teNodes, waBinary.Node{
+		Tag: "net", Attrs: waBinary.Attrs{"medium": "3"},
+	})
+
+	err := cb.internals.SendNode(ctx, waBinary.Node{
+		Tag:   "call",
+		Attrs: waBinary.Attrs{"id": cb.client.GenerateMessageID(), "from": ownID, "to": from.ToNonAD()},
+		Content: []waBinary.Node{{
+			Tag:     "transport",
+			Attrs:   waBinary.Attrs{"call-id": s.CallID, "call-creator": creator.ToNonAD()},
+			Content: content,
+		}},
+	})
+	if err != nil {
+		return err
+	}
+	cb.log.Infof("Sent transport for call %s (%d te nodes)", s.CallID, len(teNodes))
 	return nil
 }
 
