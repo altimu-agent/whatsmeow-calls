@@ -70,19 +70,28 @@ func (cb *CallBridge) AcceptCall(ctx context.Context, callID string) error {
 		return fmt.Errorf("send preaccept: %w", err)
 	}
 
-	// Small delay to allow relay latency exchange
-	time.Sleep(500 * time.Millisecond)
+	// Step 4: Ping relay servers with STUN and send relaylatency
+	var stunResults []*STUNResult
+	session.mu.RLock()
+	offer := session.Offer
+	session.mu.RUnlock()
 
-	// Step 4: Send relaylatency with RTT values from offer
+	if offer != nil && offer.Relay != nil {
+		stunResults = PingRelays(offer.Relay.Endpoints, offer.Relay.Tokens, 3*time.Second)
+		for _, r := range stunResults {
+			cb.log.Infof("STUN relay %s: RTT=%v mapped=%s:%d session=%x",
+				r.RelayName, r.RTT, r.MappedIP, r.MappedPort, r.SessionData)
+		}
+	}
+
 	if err := cb.sendRelayLatency(ctx, session); err != nil {
 		cb.log.Warnf("Failed to send relaylatency for %s: %v", callID, err)
 	}
 
-	// Small delay before accept
-	time.Sleep(300 * time.Millisecond)
+	time.Sleep(200 * time.Millisecond)
 
-	// Step 5: Send accept (audio + capability + net + encopt)
-	if err := cb.sendAccept(ctx, session); err != nil {
+	// Step 5: Send accept (audio + capability + net + encopt + te with mapped addr)
+	if err := cb.sendAccept(ctx, session, stunResults); err != nil {
 		return fmt.Errorf("send accept: %w", err)
 	}
 
@@ -199,7 +208,7 @@ func (cb *CallBridge) sendRelayLatency(ctx context.Context, s *CallSession) erro
 	return nil
 }
 
-func (cb *CallBridge) sendAccept(ctx context.Context, s *CallSession) error {
+func (cb *CallBridge) sendAccept(ctx context.Context, s *CallSession, stunResults []*STUNResult) error {
 	ownID := cb.client.Store.ID.ToNonAD()
 	s.mu.RLock()
 	from := s.From
@@ -216,7 +225,8 @@ func (cb *CallBridge) sendAccept(ctx context.Context, s *CallSession) error {
 	}
 
 	// Add te nodes with our IPs (required for caller to route media)
-	teNodes := cb.buildTENodes()
+	// Prefer STUN-mapped addresses from relay binding
+	teNodes := cb.buildTENodes(stunResults)
 	content = append(content, teNodes...)
 
 	err := cb.internals.SendNode(ctx, waBinary.Node{
@@ -238,12 +248,27 @@ func (cb *CallBridge) sendAccept(ctx context.Context, s *CallSession) error {
 	return nil
 }
 
-// buildTENodes creates transport endpoint nodes with our local and public IPs.
-func (cb *CallBridge) buildTENodes() []waBinary.Node {
+// buildTENodes creates transport endpoint nodes with our IPs.
+// Prefers STUN-mapped addresses from relay binding if available.
+func (cb *CallBridge) buildTENodes(stunResults []*STUNResult) []waBinary.Node {
 	var nodes []waBinary.Node
 
-	// Public IP (priority 2 = global/reflexive)
-	if cb.opts.PublicIP != "" {
+	// Use STUN-mapped address (server-reflexive) if available
+	for _, r := range stunResults {
+		if r.MappedIP != nil {
+			if ipPort := encodeIPPort(r.MappedIP.String(), r.MappedPort); ipPort != nil {
+				nodes = append(nodes, waBinary.Node{
+					Tag:     "te",
+					Attrs:   waBinary.Attrs{"priority": "2"},
+					Content: ipPort,
+				})
+				break // one reflexive address is enough
+			}
+		}
+	}
+
+	// Fallback: configured public IP
+	if len(nodes) == 0 && cb.opts.PublicIP != "" {
 		if ipPort := encodeIPPort(cb.opts.PublicIP, 0); ipPort != nil {
 			nodes = append(nodes, waBinary.Node{
 				Tag:     "te",
@@ -253,7 +278,7 @@ func (cb *CallBridge) buildTENodes() []waBinary.Node {
 		}
 	}
 
-	// Local IP (priority 0 = local/host)
+	// Local IP (priority 0 = host candidate)
 	if cb.opts.LocalIP != "" {
 		if ipPort := encodeIPPort(cb.opts.LocalIP, 0); ipPort != nil {
 			nodes = append(nodes, waBinary.Node{
