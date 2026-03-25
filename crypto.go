@@ -32,17 +32,40 @@ func (cb *CallBridge) DecryptCallOffer(ctx context.Context, session *CallSession
 		return existing, nil
 	}
 
-	if offer == nil || offer.EncNode == nil {
+	offerNode := session.OfferNode
+	if offer == nil || offer.EncNode == nil || offerNode == nil {
 		return nil, fmt.Errorf("no enc node in offer for call %s", session.CallID)
 	}
 
 	// Determine if this is a PreKey message
 	isPreKey := offer.EncType == "msg"
 
+	// Try to get the enc node from the raw offer node first (preserves original types),
+	// fall back to the parsed copy
+	encNode := offer.EncNode
+	if offerNode != nil {
+		for _, child := range offerNode.GetChildren() {
+			if child.Tag == "enc" {
+				encNode = &child
+				break
+			}
+		}
+	}
+	if encNode.Content != nil {
+		switch v := encNode.Content.(type) {
+		case []byte:
+			cb.log.Infof("Enc node content: []byte, %d bytes, first=0x%02x", len(v), v[0])
+		case string:
+			cb.log.Infof("Enc node content: string, %d chars", len(v))
+		default:
+			cb.log.Infof("Enc node content: %T", encNode.Content)
+		}
+	}
+
 	cb.log.Infof("Decrypting call offer %s (type=%s, isPreKey=%v, from=%s)",
 		session.CallID, offer.EncType, isPreKey, creator)
 
-	plaintext, _, err := cb.internals.DecryptDM(ctx, offer.EncNode, creator, isPreKey, startedAt)
+	plaintext, _, err := cb.internals.DecryptDM(ctx, encNode, creator, isPreKey, startedAt)
 	if err != nil {
 		return nil, fmt.Errorf("decrypt call offer: %w", err)
 	}
