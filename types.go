@@ -115,6 +115,12 @@ type Options struct {
 	// automatically rejected. If empty, all calls are allowed through.
 	AllowedNumbers []string
 
+	// ResolvePhone translates a JID to a phone number string for whitelist
+	// matching. This is needed because WhatsApp may send calls using LIDs
+	// (hidden user server) instead of phone numbers. If nil, the JID.User
+	// field is used directly.
+	ResolvePhone func(jid types.JID) string
+
 	// OnIncomingCall is invoked when a new call offer is received.
 	// The callback receives an IncomingCall that can be used to accept or reject.
 	OnIncomingCall func(call *IncomingCall)

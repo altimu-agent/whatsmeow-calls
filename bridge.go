@@ -126,7 +126,13 @@ func (cb *CallBridge) isAllowed(jid types.JID) bool {
 	if len(cb.allowed) == 0 {
 		return true
 	}
-	return cb.allowed[jid.User]
+	phone := jid.User
+	if cb.opts.ResolvePhone != nil {
+		if resolved := cb.opts.ResolvePhone(jid); resolved != "" {
+			phone = resolved
+		}
+	}
+	return cb.allowed[phone]
 }
 
 func (cb *CallBridge) recordNode(session *CallSession, eventType string, node *waBinary.Node) {
@@ -146,6 +152,9 @@ func (cb *CallBridge) recordNode(session *CallSession, eventType string, node *w
 }
 
 func (cb *CallBridge) handleOffer(evt *events.CallOffer) {
+	// Always dump the offer node first (even if we'll reject)
+	_ = SaveDump(cb.opts.LogDir, evt.CallID, "offer", evt.Data)
+
 	if !cb.isAllowed(evt.From) {
 		cb.log.Infof("Rejecting call from non-whitelisted number %s (id=%s)", evt.From, evt.CallID)
 		_ = cb.client.RejectCall(context.Background(), evt.From, evt.CallID)
@@ -181,6 +190,8 @@ func (cb *CallBridge) handleOffer(evt *events.CallOffer) {
 }
 
 func (cb *CallBridge) handleOfferNotice(evt *events.CallOfferNotice) {
+	_ = SaveDump(cb.opts.LogDir, evt.CallID, "offer_notice", evt.Data)
+
 	if !cb.isAllowed(evt.From) {
 		cb.log.Infof("Rejecting group call from non-whitelisted number %s (id=%s)", evt.From, evt.CallID)
 		_ = cb.client.RejectCall(context.Background(), evt.From, evt.CallID)
