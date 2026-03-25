@@ -179,6 +179,13 @@ type Options struct {
 	// OnCallTerminated is invoked when a call ends (by either party).
 	OnCallTerminated func(session *CallSession)
 
+	// PublicIP is our public IPv4 address, used in accept/transport nodes.
+	// If empty, calls can still be accepted but media may not route correctly.
+	PublicIP string
+
+	// LocalIP is our local/private IPv4 address. If empty, 0.0.0.0 is used.
+	LocalIP string
+
 	// Logger for call bridge events. If nil, a no-op logger is used.
 	Logger waLog.Logger
 }

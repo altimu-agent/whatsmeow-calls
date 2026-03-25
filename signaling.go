@@ -8,6 +8,7 @@ import (
 	"context"
 	"encoding/binary"
 	"fmt"
+	"net"
 	"time"
 
 	waBinary "go.mau.fi/whatsmeow/binary"
@@ -205,6 +206,19 @@ func (cb *CallBridge) sendAccept(ctx context.Context, s *CallSession) error {
 	creator := s.Creator
 	s.mu.RUnlock()
 
+	// Build child nodes for accept
+	content := []waBinary.Node{
+		{Tag: "audio", Attrs: waBinary.Attrs{"enc": "opus", "rate": "16000"}},
+		{Tag: "audio", Attrs: waBinary.Attrs{"enc": "opus", "rate": "8000"}},
+		{Tag: "net", Attrs: waBinary.Attrs{"medium": "3"}},
+		{Tag: "encopt", Attrs: waBinary.Attrs{"keygen": "2"}},
+		{Tag: "capability", Attrs: waBinary.Attrs{"ver": "1"}, Content: []byte{1, 4, 247, 11, 206, 3}},
+	}
+
+	// Add te nodes with our IPs (required for caller to route media)
+	teNodes := cb.buildTENodes()
+	content = append(content, teNodes...)
+
 	err := cb.internals.SendNode(ctx, waBinary.Node{
 		Tag:   "call",
 		Attrs: waBinary.Attrs{"id": cb.client.GenerateMessageID(), "from": ownID, "to": from.ToNonAD()},
@@ -214,20 +228,59 @@ func (cb *CallBridge) sendAccept(ctx context.Context, s *CallSession) error {
 				"call-id":      s.CallID,
 				"call-creator": creator.ToNonAD(),
 			},
-			Content: []waBinary.Node{
-				{Tag: "audio", Attrs: waBinary.Attrs{"enc": "opus", "rate": "16000"}},
-				{Tag: "audio", Attrs: waBinary.Attrs{"enc": "opus", "rate": "8000"}},
-				{Tag: "net", Attrs: waBinary.Attrs{"medium": "3"}},
-				{Tag: "encopt", Attrs: waBinary.Attrs{"keygen": "2"}},
-				{Tag: "capability", Attrs: waBinary.Attrs{"ver": "1"}, Content: []byte{1, 4, 247, 11, 206, 3}},
-			},
+			Content: content,
 		}},
 	})
 	if err != nil {
 		return err
 	}
-	cb.log.Infof("Sent accept for call %s", s.CallID)
+	cb.log.Infof("Sent accept for call %s (with %d te nodes)", s.CallID, len(teNodes))
 	return nil
+}
+
+// buildTENodes creates transport endpoint nodes with our local and public IPs.
+func (cb *CallBridge) buildTENodes() []waBinary.Node {
+	var nodes []waBinary.Node
+
+	// Public IP (priority 2 = global/reflexive)
+	if cb.opts.PublicIP != "" {
+		if ipPort := encodeIPPort(cb.opts.PublicIP, 0); ipPort != nil {
+			nodes = append(nodes, waBinary.Node{
+				Tag:     "te",
+				Attrs:   waBinary.Attrs{"priority": "2"},
+				Content: ipPort,
+			})
+		}
+	}
+
+	// Local IP (priority 0 = local/host)
+	if cb.opts.LocalIP != "" {
+		if ipPort := encodeIPPort(cb.opts.LocalIP, 0); ipPort != nil {
+			nodes = append(nodes, waBinary.Node{
+				Tag:     "te",
+				Attrs:   waBinary.Attrs{"priority": "0"},
+				Content: ipPort,
+			})
+		}
+	}
+
+	return nodes
+}
+
+// encodeIPPort encodes an IP:port pair as 6 bytes (4 bytes IPv4 + 2 bytes port big-endian).
+func encodeIPPort(ip string, port uint16) []byte {
+	parsed := net.ParseIP(ip)
+	if parsed == nil {
+		return nil
+	}
+	ipv4 := parsed.To4()
+	if ipv4 == nil {
+		return nil
+	}
+	buf := make([]byte, 6)
+	copy(buf[:4], ipv4)
+	binary.BigEndian.PutUint16(buf[4:], port)
+	return buf
 }
 
 // OfferCall initiates an outgoing call to the specified JID.
