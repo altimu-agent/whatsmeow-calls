@@ -170,6 +170,7 @@ func (cb *CallBridge) handleOffer(evt *events.CallOffer) {
 	session.From = evt.From
 	session.Creator = evt.CallCreator
 	session.CreatorAlt = evt.CallCreatorAlt
+	session.PeerPN = evt.CallCreatorAlt // caller_pn — phone number JID
 	session.GroupJID = evt.GroupJID
 	session.Platform = evt.RemotePlatform
 	session.Version = evt.RemoteVersion

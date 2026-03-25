@@ -124,19 +124,31 @@ func (cb *CallBridge) AcceptCall(ctx context.Context, callID string) error {
 	return nil
 }
 
+// peerJID returns the best JID to send signaling nodes to.
+// Prefers the phone number JID (caller_pn) over the LID.
+func (cb *CallBridge) peerJID(s *CallSession) (to, creator types.JID) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	to = s.From.ToNonAD()
+	creator = s.Creator.ToNonAD()
+	// If we have a phone number JID, use it instead of LID
+	if !s.PeerPN.IsEmpty() && s.PeerPN.Server != types.HiddenUserServer {
+		to = s.PeerPN.ToNonAD()
+		creator = s.PeerPN.ToNonAD()
+	}
+	return
+}
+
 func (cb *CallBridge) sendReceipt(ctx context.Context, s *CallSession) error {
 	ownID := cb.client.Store.ID.ToNonAD()
-	s.mu.RLock()
-	from := s.From
-	creator := s.Creator
-	s.mu.RUnlock()
+	to, creator := cb.peerJID(s)
 
 	err := cb.internals.SendNode(ctx, waBinary.Node{
 		Tag:   "call",
-		Attrs: waBinary.Attrs{"id": cb.client.GenerateMessageID(), "from": ownID, "to": from.ToNonAD()},
+		Attrs: waBinary.Attrs{"id": cb.client.GenerateMessageID(), "from": ownID, "to": to},
 		Content: []waBinary.Node{{
 			Tag:   "receipt",
-			Attrs: waBinary.Attrs{"call-id": s.CallID, "call-creator": creator.ToNonAD()},
+			Attrs: waBinary.Attrs{"call-id": s.CallID, "call-creator": creator},
 		}},
 	})
 	if err != nil {
@@ -148,17 +160,14 @@ func (cb *CallBridge) sendReceipt(ctx context.Context, s *CallSession) error {
 
 func (cb *CallBridge) sendPreAccept(ctx context.Context, s *CallSession) error {
 	ownID := cb.client.Store.ID.ToNonAD()
-	s.mu.RLock()
-	from := s.From
-	creator := s.Creator
-	s.mu.RUnlock()
+	to, creator := cb.peerJID(s)
 
 	err := cb.internals.SendNode(ctx, waBinary.Node{
 		Tag:   "call",
-		Attrs: waBinary.Attrs{"id": cb.client.GenerateMessageID(), "from": ownID, "to": from.ToNonAD()},
+		Attrs: waBinary.Attrs{"id": cb.client.GenerateMessageID(), "from": ownID, "to": to},
 		Content: []waBinary.Node{{
 			Tag:   "preaccept",
-			Attrs: waBinary.Attrs{"call-id": s.CallID, "call-creator": creator.ToNonAD()},
+			Attrs: waBinary.Attrs{"call-id": s.CallID, "call-creator": creator},
 			Content: []waBinary.Node{
 				{Tag: "audio", Attrs: waBinary.Attrs{"enc": "opus", "rate": "16000"}},
 				{Tag: "audio", Attrs: waBinary.Attrs{"enc": "opus", "rate": "8000"}},
@@ -176,9 +185,8 @@ func (cb *CallBridge) sendPreAccept(ctx context.Context, s *CallSession) error {
 }
 
 func (cb *CallBridge) sendRelayLatency(ctx context.Context, s *CallSession) error {
+	to, creator := cb.peerJID(s)
 	s.mu.RLock()
-	from := s.From
-	creator := s.Creator
 	offer := s.Offer
 	s.mu.RUnlock()
 
@@ -187,7 +195,6 @@ func (cb *CallBridge) sendRelayLatency(ctx context.Context, s *CallSession) erro
 	}
 
 	ownID := cb.client.Store.ID.ToNonAD()
-
 	// Deduplicate endpoints by relay name and build te nodes
 	seen := make(map[string]bool)
 	var teNodes []waBinary.Node
@@ -214,10 +221,10 @@ func (cb *CallBridge) sendRelayLatency(ctx context.Context, s *CallSession) erro
 
 	err := cb.internals.SendNode(ctx, waBinary.Node{
 		Tag:   "call",
-		Attrs: waBinary.Attrs{"id": cb.client.GenerateMessageID(), "from": ownID, "to": from.ToNonAD()},
+		Attrs: waBinary.Attrs{"id": cb.client.GenerateMessageID(), "from": ownID, "to": to},
 		Content: []waBinary.Node{{
 			Tag:     "relaylatency",
-			Attrs:   waBinary.Attrs{"call-id": s.CallID, "call-creator": creator.ToNonAD()},
+			Attrs:   waBinary.Attrs{"call-id": s.CallID, "call-creator": creator},
 			Content: teNodes,
 		}},
 	})
@@ -235,10 +242,7 @@ func (cb *CallBridge) sendRelayLatencyFromSTUN(ctx context.Context, s *CallSessi
 	}
 
 	ownID := cb.client.Store.ID.ToNonAD()
-	s.mu.RLock()
-	from := s.From
-	creator := s.Creator
-	s.mu.RUnlock()
+	to, creator := cb.peerJID(s)
 
 	var teNodes []waBinary.Node
 	for _, r := range results {
@@ -274,10 +278,10 @@ func (cb *CallBridge) sendRelayLatencyFromSTUN(ctx context.Context, s *CallSessi
 
 	err := cb.internals.SendNode(ctx, waBinary.Node{
 		Tag:   "call",
-		Attrs: waBinary.Attrs{"id": cb.client.GenerateMessageID(), "from": ownID, "to": from.ToNonAD()},
+		Attrs: waBinary.Attrs{"id": cb.client.GenerateMessageID(), "from": ownID, "to": to},
 		Content: []waBinary.Node{{
 			Tag:     "relaylatency",
-			Attrs:   waBinary.Attrs{"call-id": s.CallID, "call-creator": creator.ToNonAD()},
+			Attrs:   waBinary.Attrs{"call-id": s.CallID, "call-creator": creator},
 			Content: teNodes,
 		}},
 	})
@@ -291,10 +295,7 @@ func (cb *CallBridge) sendRelayLatencyFromSTUN(ctx context.Context, s *CallSessi
 // sendTransport sends our transport endpoint information to the caller.
 func (cb *CallBridge) sendTransport(ctx context.Context, s *CallSession, stunResults []*STUNResult) error {
 	ownID := cb.client.Store.ID.ToNonAD()
-	s.mu.RLock()
-	from := s.From
-	creator := s.Creator
-	s.mu.RUnlock()
+	to, creator := cb.peerJID(s)
 
 	teNodes := cb.buildTENodes(stunResults)
 	if len(teNodes) == 0 {
@@ -307,10 +308,10 @@ func (cb *CallBridge) sendTransport(ctx context.Context, s *CallSession, stunRes
 
 	err := cb.internals.SendNode(ctx, waBinary.Node{
 		Tag:   "call",
-		Attrs: waBinary.Attrs{"id": cb.client.GenerateMessageID(), "from": ownID, "to": from.ToNonAD()},
+		Attrs: waBinary.Attrs{"id": cb.client.GenerateMessageID(), "from": ownID, "to": to},
 		Content: []waBinary.Node{{
 			Tag:     "transport",
-			Attrs:   waBinary.Attrs{"call-id": s.CallID, "call-creator": creator.ToNonAD()},
+			Attrs:   waBinary.Attrs{"call-id": s.CallID, "call-creator": creator},
 			Content: content,
 		}},
 	})
@@ -323,10 +324,7 @@ func (cb *CallBridge) sendTransport(ctx context.Context, s *CallSession, stunRes
 
 func (cb *CallBridge) sendAccept(ctx context.Context, s *CallSession, stunResults []*STUNResult) error {
 	ownID := cb.client.Store.ID.ToNonAD()
-	s.mu.RLock()
-	from := s.From
-	creator := s.Creator
-	s.mu.RUnlock()
+	to, creator := cb.peerJID(s)
 
 	// Build child nodes for accept
 	content := []waBinary.Node{
@@ -344,7 +342,7 @@ func (cb *CallBridge) sendAccept(ctx context.Context, s *CallSession, stunResult
 
 	err := cb.internals.SendNode(ctx, waBinary.Node{
 		Tag:   "call",
-		Attrs: waBinary.Attrs{"id": cb.client.GenerateMessageID(), "from": ownID, "to": from.ToNonAD()},
+		Attrs: waBinary.Attrs{"id": cb.client.GenerateMessageID(), "from": ownID, "to": to},
 		Content: []waBinary.Node{{
 			Tag: "accept",
 			Attrs: waBinary.Attrs{

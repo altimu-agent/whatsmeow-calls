@@ -76,6 +76,7 @@ type CallSession struct {
 	Offer            *OfferData
 	DecryptedPayload []byte // decrypted SRTP key material from Signal enc
 	CallKey          []byte // 32-byte SRTP master secret (extracted from DecryptedPayload)
+	PeerPN           types.JID // Phone number JID (from caller_pn), may differ from From (LID)
 
 	// Raw signaling nodes — essential for protocol reverse-engineering
 	OfferNode     *waBinary.Node
