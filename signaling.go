@@ -82,7 +82,7 @@ func (cb *CallBridge) AcceptCall(ctx context.Context, callID string) error {
 		for id, tok := range offer.Relay.Tokens {
 			cb.log.Debugf("  Token %s: %d bytes", id, len(tok))
 		}
-		stunResults = PingRelaysWithLog(offer.Relay.Endpoints, offer.Relay.Tokens, offer.Relay.AuthTokens, 3*time.Second, cb.log)
+		stunResults = PingRelaysWithLog(offer.Relay.Endpoints, offer.Relay.Tokens, offer.Relay.AuthTokens, offer.Relay.Key, 3*time.Second, cb.log)
 		for _, r := range stunResults {
 			cb.log.Infof("STUN relay %s: type=0x%04x size=%d RTT=%v mapped=%s:%d session=%x otherAttrs=%d",
 				r.RelayName, r.ResponseType, r.ResponseSize, r.RTT, r.MappedIP, r.MappedPort, r.SessionData, len(r.OtherAttrs))
@@ -124,18 +124,13 @@ func (cb *CallBridge) AcceptCall(ctx context.Context, callID string) error {
 	return nil
 }
 
-// peerJID returns the best JID to send signaling nodes to.
-// Prefers the phone number JID (caller_pn) over the LID.
+// peerJID returns the JID to send signaling nodes to.
+// Uses the same addressing as RejectCall (which works): From.ToNonAD().
 func (cb *CallBridge) peerJID(s *CallSession) (to, creator types.JID) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	to = s.From.ToNonAD()
 	creator = s.Creator.ToNonAD()
-	// If we have a phone number JID, use it instead of LID
-	if !s.PeerPN.IsEmpty() && s.PeerPN.Server != types.HiddenUserServer {
-		to = s.PeerPN.ToNonAD()
-		creator = s.PeerPN.ToNonAD()
-	}
 	return
 }
 

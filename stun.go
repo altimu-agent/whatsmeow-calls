@@ -5,7 +5,9 @@
 package whatsmeowcalls
 
 import (
+	"crypto/hmac"
 	"crypto/rand"
+	"crypto/sha1"
 	"encoding/binary"
 	"fmt"
 	"net"
@@ -45,9 +47,10 @@ type STUNResult struct {
 	OtherAttrs   []stunAttribute // any other attributes in the response
 }
 
-// PingRelay sends a STUN Allocate request with a WhatsApp token to a relay server.
+// PingRelay sends a STUN Binding request with a WhatsApp token to a relay server.
+// If hmacKey is provided, MESSAGE-INTEGRITY (HMAC-SHA1) is appended.
 // Returns the result including our mapped address and RTT.
-func PingRelay(endpoint RelayEndpoint, token []byte, timeout time.Duration) (*STUNResult, error) {
+func PingRelay(endpoint RelayEndpoint, token, hmacKey []byte, timeout time.Duration) (*STUNResult, error) {
 	if token == nil {
 		return nil, fmt.Errorf("nil token for relay %s", endpoint.RelayName)
 	}
@@ -60,13 +63,19 @@ func PingRelay(endpoint RelayEndpoint, token []byte, timeout time.Duration) (*ST
 	defer conn.Close()
 	conn.SetDeadline(time.Now().Add(timeout))
 
-	// Build STUN Allocate request with 0x4000 token
+	// Build STUN Binding request with 0x4000 token
 	txID := make([]byte, 12)
 	rand.Read(txID)
 
-	msg := buildSTUNMessage(stunBindingRequest, txID, []stunAttribute{
+	reqAttrs := []stunAttribute{
 		{Type: stunAttrWAToken, Value: token},
-	})
+	}
+	msg := buildSTUNMessage(stunBindingRequest, txID, reqAttrs)
+
+	// Add MESSAGE-INTEGRITY if we have a key
+	if len(hmacKey) > 0 {
+		msg = appendMessageIntegrity(msg, hmacKey)
+	}
 
 	start := time.Now()
 	if _, err := conn.Write(msg); err != nil {
@@ -90,12 +99,12 @@ func PingRelay(endpoint RelayEndpoint, token []byte, timeout time.Duration) (*ST
 		ResponseSize: n,
 	}
 
-	attrs, err := parseSTUNResponse(buf[:n], txID)
+	respAttrs, err := parseSTUNResponse(buf[:n], txID)
 	if err != nil {
 		return result, fmt.Errorf("parse response from %s: %w", endpoint.RelayName, err)
 	}
 
-	for _, attr := range attrs {
+	for _, attr := range respAttrs {
 		switch attr.Type {
 		case stunAttrXORMappedAddr:
 			result.MappedIP, result.MappedPort = decodeXORMappedAddr(attr.Value, txID)
@@ -110,12 +119,12 @@ func PingRelay(endpoint RelayEndpoint, token []byte, timeout time.Duration) (*ST
 }
 
 // PingRelays sends STUN Allocate requests to multiple relay endpoints in parallel.
-func PingRelays(endpoints []RelayEndpoint, tokens, authTokens map[string][]byte, timeout time.Duration) []*STUNResult {
-	return PingRelaysWithLog(endpoints, tokens, authTokens, timeout, nil)
+func PingRelays(endpoints []RelayEndpoint, tokens, authTokens map[string][]byte, relayKey []byte, timeout time.Duration) []*STUNResult {
+	return PingRelaysWithLog(endpoints, tokens, authTokens, relayKey, timeout, nil)
 }
 
 // PingRelaysWithLog is like PingRelays but logs errors via the provided logger.
-func PingRelaysWithLog(endpoints []RelayEndpoint, tokens, authTokens map[string][]byte, timeout time.Duration, log waLog.Logger) []*STUNResult {
+func PingRelaysWithLog(endpoints []RelayEndpoint, tokens, authTokens map[string][]byte, relayKey []byte, timeout time.Duration, log waLog.Logger) []*STUNResult {
 	type result struct {
 		res *STUNResult
 		err error
@@ -144,7 +153,7 @@ func PingRelaysWithLog(endpoints []RelayEndpoint, tokens, authTokens map[string]
 
 		launched++
 		go func(ep RelayEndpoint, tok []byte) {
-			res, err := PingRelay(ep, tok, timeout)
+			res, err := PingRelay(ep, tok, relayKey, timeout)
 			ch <- result{res, err, ep}
 		}(ep, token)
 	}
@@ -275,4 +284,30 @@ func decodeXORMappedAddr(data []byte, txID []byte) (net.IP, uint16) {
 	}
 
 	return nil, 0
+}
+
+// appendMessageIntegrity adds a MESSAGE-INTEGRITY attribute (HMAC-SHA1) to a STUN message.
+// Per RFC 5389: HMAC is computed over the message up to (but not including) the
+// MESSAGE-INTEGRITY attribute itself, with the length field adjusted to include it.
+func appendMessageIntegrity(msg []byte, key []byte) []byte {
+	const miAttrType = 0x0008
+	const miAttrLen = 20 // SHA1 = 20 bytes
+	const miTotalLen = 4 + miAttrLen // type(2) + length(2) + value(20)
+
+	// Update the STUN header length to include MESSAGE-INTEGRITY
+	currentBodyLen := binary.BigEndian.Uint16(msg[2:4])
+	binary.BigEndian.PutUint16(msg[2:4], currentBodyLen+miTotalLen)
+
+	// Compute HMAC-SHA1 over the message with the updated length
+	mac := hmac.New(sha1.New, key)
+	mac.Write(msg)
+	digest := mac.Sum(nil)
+
+	// Append the attribute
+	attr := make([]byte, miTotalLen)
+	binary.BigEndian.PutUint16(attr[0:2], miAttrType)
+	binary.BigEndian.PutUint16(attr[2:4], miAttrLen)
+	copy(attr[4:], digest)
+
+	return append(msg, attr...)
 }
