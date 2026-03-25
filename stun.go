@@ -110,12 +110,12 @@ func PingRelay(endpoint RelayEndpoint, token []byte, timeout time.Duration) (*ST
 }
 
 // PingRelays sends STUN Allocate requests to multiple relay endpoints in parallel.
-func PingRelays(endpoints []RelayEndpoint, tokens map[string][]byte, timeout time.Duration) []*STUNResult {
-	return PingRelaysWithLog(endpoints, tokens, timeout, nil)
+func PingRelays(endpoints []RelayEndpoint, tokens, authTokens map[string][]byte, timeout time.Duration) []*STUNResult {
+	return PingRelaysWithLog(endpoints, tokens, authTokens, timeout, nil)
 }
 
 // PingRelaysWithLog is like PingRelays but logs errors via the provided logger.
-func PingRelaysWithLog(endpoints []RelayEndpoint, tokens map[string][]byte, timeout time.Duration, log waLog.Logger) []*STUNResult {
+func PingRelaysWithLog(endpoints []RelayEndpoint, tokens, authTokens map[string][]byte, timeout time.Duration, log waLog.Logger) []*STUNResult {
 	type result struct {
 		res *STUNResult
 		err error
@@ -133,10 +133,15 @@ func PingRelaysWithLog(endpoints []RelayEndpoint, tokens map[string][]byte, time
 		}
 		seen[ep.RelayName] = true
 
-		token := tokens[ep.TokenID]
+		// Use auth_token for STUN binding (token is for media relay)
+		token := authTokens[ep.AuthTokenID]
+		if token == nil {
+			// Fallback to regular token
+			token = tokens[ep.TokenID]
+		}
 		if token == nil {
 			if log != nil {
-				log.Warnf("No token for relay %s (token_id=%s)", ep.RelayName, ep.TokenID)
+				log.Warnf("No token for relay %s (auth_token_id=%s, token_id=%s)", ep.RelayName, ep.AuthTokenID, ep.TokenID)
 			}
 			continue
 		}
