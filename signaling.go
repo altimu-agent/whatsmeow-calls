@@ -77,10 +77,18 @@ func (cb *CallBridge) AcceptCall(ctx context.Context, callID string) error {
 	session.mu.RUnlock()
 
 	if offer != nil && offer.Relay != nil {
-		stunResults = PingRelays(offer.Relay.Endpoints, offer.Relay.Tokens, 3*time.Second)
+		cb.log.Infof("Pinging %d relay endpoints with %d tokens...",
+			len(offer.Relay.Endpoints), len(offer.Relay.Tokens))
+		for id, tok := range offer.Relay.Tokens {
+			cb.log.Debugf("  Token %s: %d bytes", id, len(tok))
+		}
+		stunResults = PingRelaysWithLog(offer.Relay.Endpoints, offer.Relay.Tokens, 3*time.Second, cb.log)
 		for _, r := range stunResults {
 			cb.log.Infof("STUN relay %s: RTT=%v mapped=%s:%d session=%x",
 				r.RelayName, r.RTT, r.MappedIP, r.MappedPort, r.SessionData)
+		}
+		if len(stunResults) == 0 {
+			cb.log.Warnf("All STUN relay pings failed for call %s", callID)
 		}
 	}
 
