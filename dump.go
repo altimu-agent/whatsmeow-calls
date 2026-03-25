@@ -97,6 +97,14 @@ func SaveDump(dir, callID, eventType string, node *waBinary.Node) error {
 	return os.WriteFile(filename, envelopeData, 0644)
 }
 
+// dumpBytesAsNode wraps raw bytes in a Node for saving via SaveDump.
+func dumpBytesAsNode(tag string, data []byte) *waBinary.Node {
+	return &waBinary.Node{
+		Tag:     tag,
+		Content: data,
+	}
+}
+
 func sanitizeFilename(s string) string {
 	replacer := strings.NewReplacer("/", "_", "\\", "_", ":", "_", " ", "_")
 	return replacer.Replace(s)

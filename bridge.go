@@ -15,6 +15,7 @@ package whatsmeowcalls
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"sync"
 	"time"
@@ -174,6 +175,29 @@ func (cb *CallBridge) handleOffer(evt *events.CallOffer) {
 	session.Version = evt.RemoteVersion
 	session.OfferNode = evt.Data
 	session.mu.Unlock()
+
+	// Parse structured offer data
+	if offerData, err := ParseOffer(evt.Data); err == nil {
+		session.mu.Lock()
+		session.Offer = offerData
+		session.mu.Unlock()
+
+		// Log parsed info
+		codecs := ""
+		for _, c := range offerData.AudioCodecs {
+			codecs += fmt.Sprintf("%s@%d ", c.Enc, c.Rate)
+		}
+		if offerData.Relay != nil {
+			cb.log.Infof("Offer parsed: codecs=[%s] relays=%d endpoints=%d enc_type=%s",
+				codecs, len(offerData.Relay.Tokens), len(offerData.Relay.Endpoints), offerData.EncType)
+			for _, ep := range offerData.Relay.Endpoints {
+				cb.log.Debugf("  Relay %s: %s:%d (RTT=%dms, proto=%s)",
+					ep.RelayName, ep.IP, ep.Port, ep.RTT, ep.Protocol)
+			}
+		}
+	} else {
+		cb.log.Warnf("Failed to parse offer for call %s: %v", evt.CallID, err)
+	}
 
 	cb.log.Infof("Incoming call from %s (id=%s, platform=%s, version=%s)",
 		evt.From, evt.CallID, evt.RemotePlatform, evt.RemoteVersion)

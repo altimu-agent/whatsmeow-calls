@@ -7,6 +7,7 @@ package whatsmeowcalls
 import (
 	"context"
 	"errors"
+	"net"
 	"sync"
 	"time"
 
@@ -71,6 +72,10 @@ type CallSession struct {
 	// Termination reason (from CallTerminate)
 	TerminateReason string
 
+	// Parsed offer data (Phase 2)
+	Offer            *OfferData
+	DecryptedPayload []byte // decrypted SRTP key material from Signal enc
+
 	// Raw signaling nodes — essential for protocol reverse-engineering
 	OfferNode     *waBinary.Node
 	TransportNode *waBinary.Node
@@ -101,6 +106,48 @@ func (ic *IncomingCall) Reject(ctx context.Context) error {
 // NOTE: Not yet implemented — requires protocol analysis from call dumps.
 func (ic *IncomingCall) Accept(ctx context.Context) error {
 	return ic.bridge.AcceptCall(ctx, ic.CallID)
+}
+
+// OfferData is the parsed content of a CallOffer node.
+type OfferData struct {
+	AudioCodecs  []AudioCodec
+	EncNode      *waBinary.Node // raw <enc> node for decryption
+	EncType      string         // "msg" (prekey) or "pkmsg"
+	EncVersion   int
+	Relay        *RelayInfo
+	VoIPSettings map[string]any // parsed JSON from <voip_settings>
+	Capabilities []byte
+	NetMedium    string
+}
+
+// AudioCodec describes a supported audio codec from the offer.
+type AudioCodec struct {
+	Enc  string // e.g. "opus"
+	Rate int    // e.g. 16000, 8000
+}
+
+// RelayInfo contains parsed relay server data from the offer.
+type RelayInfo struct {
+	UUID       string
+	PeerPID    string
+	SelfPID    string
+	Tokens     map[string][]byte // token id -> raw bytes
+	AuthTokens map[string][]byte // auth_token id -> raw bytes
+	Key        []byte            // relay key (decoded)
+	HBHKey     []byte            // hop-by-hop key (decoded)
+	Endpoints  []RelayEndpoint
+}
+
+// RelayEndpoint is a single relay server address extracted from a <te2> node.
+type RelayEndpoint struct {
+	RelayID     string
+	RelayName   string
+	IP          net.IP
+	Port        uint16
+	Protocol    string // "0" = default, "1" = alternate
+	RTT         int    // client-to-relay RTT in ms
+	TokenID     string
+	AuthTokenID string
 }
 
 // Options configures the CallBridge behavior.
