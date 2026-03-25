@@ -44,9 +44,12 @@ func ParseRelay(node *waBinary.Node) (*RelayInfo, error) {
 			}
 
 		case "key":
-			relay.Key = decodeDoubleBase64(child)
+			// Store both raw (ASCII b64 string) and decoded versions
+			relay.KeyRaw = decodeNodeContent(child) // ASCII base64 string as bytes
+			relay.Key = decodeDoubleBase64(child)    // fully decoded binary
 
 		case "hbh_key":
+			relay.HBHKeyRaw = decodeNodeContent(child)
 			relay.HBHKey = decodeDoubleBase64(child)
 
 		case "te2":

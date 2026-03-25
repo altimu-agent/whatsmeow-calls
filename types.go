@@ -135,8 +135,10 @@ type RelayInfo struct {
 	SelfPID    string
 	Tokens     map[string][]byte // token id -> raw bytes
 	AuthTokens map[string][]byte // auth_token id -> raw bytes
-	Key        []byte            // relay key (decoded)
-	HBHKey     []byte            // hop-by-hop key (decoded)
+	Key        []byte            // relay key (double-base64 decoded)
+	KeyRaw     []byte            // relay key as raw ASCII base64 string
+	HBHKey     []byte            // hop-by-hop key (double-base64 decoded)
+	HBHKeyRaw  []byte            // hop-by-hop key as raw ASCII base64 string
 	Endpoints  []RelayEndpoint
 }
 

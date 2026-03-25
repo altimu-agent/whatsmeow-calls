@@ -82,8 +82,14 @@ func (cb *CallBridge) AcceptCall(ctx context.Context, callID string) error {
 		for id, tok := range offer.Relay.Tokens {
 			cb.log.Debugf("  Token %s: %d bytes", id, len(tok))
 		}
-		// Use hbh_key (hop-by-hop) for STUN MESSAGE-INTEGRITY
-		stunResults = PingRelaysWithLog(offer.Relay.Endpoints, offer.Relay.Tokens, offer.Relay.AuthTokens, offer.Relay.HBHKey, 3*time.Second, cb.log)
+		// Use raw ASCII base64 string as HMAC key (not double-decoded)
+		// The relay may expect the base64 string itself, not the decoded bytes
+		hmacKey := offer.Relay.HBHKeyRaw
+		if hmacKey == nil {
+			hmacKey = offer.Relay.KeyRaw
+		}
+		cb.log.Infof("STUN HMAC key (raw): %d bytes", len(hmacKey))
+		stunResults = PingRelaysWithLog(offer.Relay.Endpoints, offer.Relay.Tokens, offer.Relay.AuthTokens, hmacKey, 3*time.Second, cb.log)
 		for _, r := range stunResults {
 			cb.log.Infof("STUN relay %s: type=0x%04x size=%d RTT=%v mapped=%s:%d session=%x otherAttrs=%d",
 				r.RelayName, r.ResponseType, r.ResponseSize, r.RTT, r.MappedIP, r.MappedPort, r.SessionData, len(r.OtherAttrs))
